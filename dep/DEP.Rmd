@@ -1,0 +1,371 @@
+---
+title: "DEP_2"
+author: "Yinghan Ma"
+date: "2025-04-14"
+output: html_document
+---
+
+```{r}
+# 加载必要的包
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(tidytext)
+library(wordcloud)
+library(igraph)
+library(corrplot)
+library(forcats)
+```
+
+```{r}
+# Load the dataset
+tweets <- read.csv("user_tweets.csv")
+user_info <- read.csv("user_info.csv")
+mbti_labels <- read.csv("mbti_labels.csv")
+edges <- read.csv("edges.csv")
+```
+
+```{r}
+# Check data structure
+str(tweets)
+str(user_info)
+str(mbti_labels)
+str(edges)
+```
+
+# Data Cleaning
+## Clean the user data
+```{r}
+user_data <- user_info %>%
+  left_join(mbti_labels, by = "id") %>%
+ # Remove extreme outliers
+  filter(followers_count < quantile(followers_count, 0.999, na.rm = TRUE),
+         friends_count < quantile(friends_count, 0.999, na.rm = TRUE),
+         statuses_count < quantile(statuses_count, 0.999, na.rm = TRUE),
+         favourites_count < quantile(favourites_count, 0.999, na.rm = TRUE))
+```
+
+## Clean the tweets data
+```{r}
+tweets_clean <- tweets %>%
+  # Filter out rows where the 'id' is not numeric
+  filter(grepl("^[0-9]+$", id))
+cat("Number of rows before cleaning:", nrow(tweets), "\n")
+cat("Number of rows after cleaning:", nrow(tweets_clean), "\n")
+
+# Convert 'id' to numerictype
+tweets_clean$id <- as.numeric(tweets_clean$id)
+str(tweets_clean$id)
+
+tweets_clean <- tweets_clean %>%
+  # There are multiple tweets, we keep only the first 20 tweets
+  select(id, starts_with("tweet_") & paste0("tweet_", 1:20)) %>%
+  # Reshape the data from multiple tweet columns to long format
+  pivot_longer(cols = starts_with("tweet_"),
+               names_to = "tweet_number",
+               values_to = "tweet_text") %>%
+  # Remove empty tweets
+  filter(!is.na(tweet_text) & tweet_text != "") %>%
+  # Clean tweet text
+  mutate(tweet_text = str_replace_all(tweet_text, "[^[:alnum:][:space:]']", ""),
+         tweet_text = str_to_lower(tweet_text),
+         tweet_length = str_length(tweet_text))
+```
+```{r}
+# 计算每种 MBTI 类型的平均互动指标
+mbti_summary <- user_data %>%
+  group_by(mbti_personality) %>%
+  summarise(
+    avg_followers = mean(followers_count, na.rm = TRUE),
+    avg_friends = mean(friends_count, na.rm = TRUE),
+    avg_statuses = mean(statuses_count, na.rm = TRUE),
+    avg_favourites = mean(favourites_count, na.rm = TRUE),
+    count = n()
+  ) %>%
+  arrange(desc(avg_statuses))  # 按发推量排序方便观察
+
+# 查看结果
+print(mbti_summary)
+```
+
+```{r}
+# 图1：MBTI vs 平均发推数量
+ggplot(mbti_summary, aes(x = fct_reorder(mbti_personality, avg_statuses, .desc = TRUE), y = avg_statuses)) +
+  geom_col(fill = "#4C72B0") +
+  labs(title = "Average Tweet Count by MBTI Type", x = "MBTI Type", y = "Average Statuses") +
+  theme_minimal()
+
+# 图2：MBTI vs 平均点赞数量
+ggplot(mbti_summary, aes(x = fct_reorder(mbti_personality, avg_favourites, .desc = TRUE), y = avg_favourites)) +
+  geom_col(fill = "#DD8452") +
+  labs(title = "Average Favourites by MBTI Type", x = "MBTI Type", y = "Average Favourites") +
+  theme_minimal()
+
+# 图3：散点图 每个用户的 发推数 vs 粉丝数，按 MBTI 着色
+ggplot(user_data, aes(x = statuses_count, y = followers_count, color = mbti_personality)) +
+  geom_point(alpha = 0.5) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(title = "Followers vs Statuses by MBTI", x = "Tweet Count (log)", y = "Followers Count (log)") +
+  theme_minimal()
+
+# 图4：箱线图 各 MBTI 的发推数量分布
+# 设置因子顺序（可选：按中位数排序）
+user_data <- user_data %>%
+  mutate(mbti_personality = fct_reorder(mbti_personality, statuses_count, .fun = median, .desc = TRUE))
+
+# 箱线图 + 均值点 + 限制 Y 轴范围让中段更清晰
+ggplot(user_data, aes(x = mbti_personality, y = statuses_count)) +
+  geom_boxplot(fill = "#55A868", outlier.alpha = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 3, color = "blue", alpha = 0.8) +  # 添加均值点
+  coord_cartesian(ylim = c(0, 50000)) +  # 限制 y 轴最大值
+  labs(
+    title = "Tweet Count Distribution by MBTI Type (Clipped at 50k)",
+    subtitle = "Boxplot with means (blue dots); outliers partially clipped",
+    x = "MBTI Type",
+    y = "Tweet Count"
+  ) +
+  theme_minimal(base_size = 13)
+```
+# 图1
+We observed clear variations in average tweet activity across different MBTI personality types. Notably, **ESFJ** users exhibited the highest average number of tweets, followed by ISTJ and ESFP. In general, personality types characterized by **Extraversion (E), Feeling (F), and Judging (J)** traits appeared to be more active on the platform.
+
+In contrast, types such as **ENTJ** and **ESTJ**, which tend to be more structured and task-oriented, showed relatively lower levels of tweet activity. This suggests that personality may play a role in determining how expressive or active users are on social media platforms.
+
+```{r}
+# Calculate average user behavior metrics by MBTI type
+user_behavior <- user_data %>%
+  group_by(mbti_personality) %>%
+  # Calculate the average followers, friends, statuses, and favorites for each MBTI type
+  summarise(
+    avg_followers = mean(followers_count),
+    avg_friends = mean(friends_count),
+    avg_statuses = mean(statuses_count),
+    avg_favorites = mean(favourites_count)
+  )
+
+# Reshape the data to a long format for easier plotting
+behavior_long <- user_behavior %>%
+  pivot_longer(cols = starts_with("avg_"), names_to = "metric", values_to = "value")
+
+# Plot the average user behavior metrics by MBTI type
+ggplot(behavior_long, aes(x = mbti_personality, y = value, fill = metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~metric, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Average User Behavior Metrics by MBTI Type", x = "MBTI Type", y = "Average Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+We conducted an exploratory analysis to investigate how different MBTI personality types engage with their social network on Twitter. We used four behavioral indicators extracted from the dataset:
+average tweet count (statuses), average favorites, average followers, and average friends.
+
+To visualize the behavioral differences, we created a multi-faceted bar plot (Figure X) showing the mean value of each metric grouped by MBTI type. The data was processed using dplyr for summarisation and plotted using ggplot2. We applied group_by() and summarise() functions to compute averages per MBTI type across all four metrics.
+
+Key findings include:
+
+Favorites: INFJ and INFP users received the highest average number of favorites, suggesting that introverted intuitive types tend to generate more engaging or emotionally resonant content.
+
+Friends (following): INFP and INFJ also have the highest number of friends, indicating a high level of interest in other users’ content despite being introverted.
+
+Followers: ENFP and ENTP types attracted the most followers on average, highlighting their potential social influence and visibility.
+
+Statuses (tweets): ESFJ and ISTJ types are the most active in terms of tweet volume, indicating high levels of content output.
+
+These patterns suggest distinct behavioral styles among MBTI categories. For instance, intuitive types may receive more attention (likes/followers), while sensing types tend to be more prolific in posting. No formal statistical test was applied at this stage, as the primary objective was exploratory and visual pattern detection.
+
+
+```{r}
+#install.packages("syuzhet")  # 如果还没装
+library(syuzhet)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+```
+
+```{r}
+# 确保 tweets_clean 和 mbti_labels 已合并
+tweets_sentiment <- tweets_clean %>%
+  left_join(mbti_labels, by = "id") %>%
+  filter(!is.na(tweet_text) & tweet_text != "") %>%
+  mutate(sentiment_score = get_sentiment(tweet_text, method = "syuzhet"))
+
+# 计算每种 MBTI 平均情绪值
+sentiment_summary <- tweets_sentiment %>%
+  group_by(mbti_personality) %>%
+  summarise(
+    avg_sentiment = mean(sentiment_score, na.rm = TRUE),
+    tweet_count = n()
+  ) %>%
+  arrange(desc(avg_sentiment))
+
+# 画图：MBTI 平均情绪值
+ggplot(sentiment_summary, aes(x = fct_reorder(mbti_personality, avg_sentiment), y = avg_sentiment)) +
+  geom_col(fill = "#C44E52") +
+  labs(
+    title = "Average Sentiment Score by MBTI Type",
+    subtitle = "Positive = more cheerful tweets; Negative = more negative tone",
+    x = "MBTI Type",
+    y = "Average Sentiment Score"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+library(dplyr)
+library(tidytext)
+library(stringr)
+library(wordcloud)
+library(RColorBrewer)
+
+# 添加 MBTI 标签（用 lowercase "e" 和 "i" 更保险）
+mbti_labels <- mbti_labels %>%
+  mutate(ei = ifelse(startsWith(tolower(mbti_personality), "e"), "Extrovert", "Introvert"))
+
+# 拆词并合并 MBTI 标签
+words_ei <- tweets_clean %>%
+  left_join(mbti_labels, by = "id") %>%
+  filter(!is.na(tweet_text) & !is.na(ei)) %>%
+  unnest_tokens(word, tweet_text) %>%
+  anti_join(stop_words) %>%
+  filter(word != "rt", str_detect(word, "^[a-zA-Z]+$"))
+
+# 额外定义常见噪声词
+custom_stopwords <- c("rt", "amp")
+
+# 在原过滤基础上添加
+words_ei <- words_ei %>%
+  filter(!word %in% custom_stopwords)
+
+# 安全统计（先过滤，再 count）
+extro_words <- words_ei %>%
+  filter(ei == "Extrovert") %>%
+  count(word, sort = TRUE) %>%
+  filter(!is.na(n) & n > 0) %>%
+  head(50)
+
+intro_words <- words_ei %>%
+  filter(ei == "Introvert") %>%
+  count(word, sort = TRUE) %>%
+  filter(!is.na(n) & n > 0) %>%
+  head(50)
+
+wordcloud(extro_words$word, extro_words$n, max.words = 100, colors = brewer.pal(8, "Dark2"))
+wordcloud(intro_words$word, intro_words$n,
+          max.words = 100,
+          scale = c(2.5, 0.5),  # 控制字体大小范围（最大4倍，最小0.5倍）
+          colors = brewer.pal(8, "Set1"))
+```
+
+
+```{r}
+user_data <- user_data %>%
+  mutate(
+    IE = substr(mbti_personality, 1, 1),
+    NS = substr(mbti_personality, 2, 2),
+    TF = substr(mbti_personality, 3, 3),
+    JP = substr(mbti_personality, 4, 4)
+  )
+
+twitter_dim <- bind_rows(
+  user_data %>% count(IE) %>% mutate(Dimension = "I/E", Group = IE),
+  user_data %>% count(NS) %>% mutate(Dimension = "N/S", Group = NS),
+  user_data %>% count(TF) %>% mutate(Dimension = "T/F", Group = TF),
+  user_data %>% count(JP) %>% mutate(Dimension = "J/P", Group = JP)
+) %>%
+  group_by(Dimension) %>%
+  mutate(Percent = n / sum(n) * 100) %>%
+  ungroup()
+
+tecla_df <- tibble::tribble(
+  ~Dimension, ~Group, ~Percent, ~Source,
+  "I/E", "I", 82.05, "TECLA",
+  "I/E", "E", 100 - 82.05, "TECLA",
+  "N/S", "N", 88.38, "TECLA",
+  "N/S", "S", 100 - 88.38, "TECLA",
+  "T/F", "F", 80.57, "TECLA",
+  "T/F", "T", 100 - 80.57, "TECLA",
+  "J/P", "J", 78.26, "TECLA",
+  "J/P", "P", 100 - 78.26, "TECLA"
+)
+
+twitter_df <- twitter_dim %>% mutate(Source = "Twitter")
+compare_df <- bind_rows(twitter_df, tecla_df)
+
+library(ggplot2)
+
+ggplot(compare_df, aes(x = Group, y = Percent, fill = Source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Dimension, scales = "free_x") +
+  scale_fill_manual(values = c("Twitter" = "#DD8452", "TECLA" = "#4C72B0")) +
+  labs(title = "Twitter User MBTI Dimensions vs TECLA Model Output",
+       y = "Percentage (%)", x = "MBTI Category") +
+  theme_minimal(base_size = 14)
+
+```
+
+
+```{r}
+# 假设你已经有 user_data，并包含 mbti_personality 列
+
+user_dims <- user_data %>%
+  mutate(
+    IE = toupper(substr(mbti_personality, 1, 1)),
+    NS = toupper(substr(mbti_personality, 2, 2)),
+    TF = toupper(substr(mbti_personality, 3, 3)),
+    JP = toupper(substr(mbti_personality, 4, 4))
+  )
+
+# 统计四维比例
+twitter_dim <- bind_rows(
+  user_dims %>% count(IE) %>% mutate(Dimension = "I/E", Group = IE),
+  user_dims %>% count(NS) %>% mutate(Dimension = "N/S", Group = NS),
+  user_dims %>% count(TF) %>% mutate(Dimension = "T/F", Group = TF),
+  user_dims %>% count(JP) %>% mutate(Dimension = "J/P", Group = JP)
+) %>%
+  group_by(Dimension) %>%
+  mutate(Percent = n / sum(n) * 100, Source = "Twitter Users") %>%
+  ungroup()
+
+tecla_dim <- tibble::tribble(
+  ~Dimension, ~Group, ~Percent,
+  "I/E", "I", 82.05,
+  "I/E", "E", 17.95,
+  "N/S", "N", 88.38,
+  "N/S", "S", 11.62,
+  "T/F", "F", 80.57,
+  "T/F", "T", 19.43,
+  "J/P", "J", 78.26,
+  "J/P", "P", 21.74
+) %>%
+  mutate(Source = "TECLA Model")
+
+global_dim <- tibble::tribble(
+  ~Dimension, ~Group, ~Percent,
+  "I/E", "I", 50,
+  "I/E", "E", 50,
+  "N/S", "N", 26,
+  "N/S", "S", 74,
+  "T/F", "T", 40,
+  "T/F", "F", 60,
+  "J/P", "J", 55,
+  "J/P", "P", 45
+) %>%
+  mutate(Source = "MBTI Baseline")
+
+combined_dim <- bind_rows(twitter_dim, tecla_dim, global_dim)
+
+ggplot(combined_dim, aes(x = Group, y = Percent, fill = Source)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~Dimension, scales = "free_x") +
+  scale_fill_manual(values = c("Twitter Users" = "#DD8452",
+                               "TECLA Model" = "#4C72B0",
+                               "MBTI Baseline" = "#55A868")) +
+  labs(title = "MBTI Dimensions: Twitter vs TECLA vs MBTI Baseline",
+       y = "Percentage (%)", x = "MBTI Category") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(size = 12),
+        strip.text = element_text(size = 13))
+
+```

@@ -69,6 +69,7 @@ A small `sample_user_tweets.csv` is provided for demonstration purposes.
 
 ```R
 shiny::runApp("app.R")
+```
 ```text
 UI Layout (MBTI Dashboard)
 ├── NavbarPage: "MBTI Social Media Dashboard"
